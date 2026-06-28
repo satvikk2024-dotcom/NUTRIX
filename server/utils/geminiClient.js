@@ -53,17 +53,14 @@ const geminiAnalyzeImage = async (base64Image, mediaType) => {
   if (!genAI) return null;
 
   const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
-  const prompt = `You are a nutrition expert. Identify the food item(s) in this image and provide detailed nutritional information.
+  const prompt = `You are a nutrition expert specializing in Indian cuisine. Identify the food in this image.
 
-Return ONLY a valid JSON object:
-{"name":"food name","description":"brief description","estimatedIngredients":["ingredient1","ingredient2"],"estimatedNutrition":{"calories":0,"protein":0,"carbs":0,"fat":0,"sugar":0,"sodium":0.05,"fiber":0},"servingSize":"estimated serving size","confidence":"high","hygieneCategory":"fresh_produce or other","washInstructions":"washing instructions if fresh produce, null otherwise","storageAdvice":"storage advice if fresh produce, null otherwise"}
+This app is used in India. Look for Indian dishes: dal chawal, rajma chawal, biryani, roti, paratha, dosa, idli, paneer dishes, chole bhature, thali items, samosa, pakora, vada pav, pav bhaji, etc. If you see rice with curry/dal, name the SPECIFIC dish (e.g. "Dal Chawal" not "rice with sauce"). For thali plates, identify individual items.
 
-RULES:
-- All nutrition values per serving
-- sodium in GRAMS (0.01-0.5g typical)
-- Be accurate with portion size estimation from the image
-- confidence: high/medium/low based on how clearly you can identify the food
-- hygieneCategory: "fresh_produce" only for raw fruits/vegetables/herbs
+Return ONLY valid JSON:
+{"name":"specific food name","description":"brief description","estimatedIngredients":["ingredient1","ingredient2"],"estimatedNutrition":{"calories":0,"protein":0,"carbs":0,"fat":0,"sugar":0,"sodium":0.05,"fiber":0},"servingSize":"estimated serving","confidence":"high","hygieneCategory":"other","washInstructions":null,"storageAdvice":null}
+
+Rules: nutrition per serving, sodium in GRAMS (0.01-0.5g), hygieneCategory "fresh_produce" only for raw fruits/vegetables.
 Return ONLY the JSON.`;
 
   const result = await model.generateContent([

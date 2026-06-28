@@ -2,7 +2,7 @@ const { Ollama } = require('ollama');
 
 const ollama = new Ollama({ host: process.env.OLLAMA_HOST || 'http://localhost:11434' });
 
-const VISION_MODEL = process.env.OLLAMA_VISION_MODEL || 'llava:7b';
+const VISION_MODEL = process.env.OLLAMA_VISION_MODEL || 'minicpm-v';
 const TEXT_MODEL = process.env.OLLAMA_TEXT_MODEL || 'qwen2.5:7b';
 const OLLAMA_TIMEOUT = 90000;
 const TEXT_TIMEOUT = 45000;

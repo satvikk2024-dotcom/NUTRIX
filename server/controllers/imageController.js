@@ -1,32 +1,29 @@
 const { analyzeImage } = require('../utils/ollamaClient');
 const { geminiAnalyzeImage, isGeminiAvailable } = require('../utils/geminiClient');
+const { findMatch } = require('../utils/indianFoodDB');
 
 const VALID_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
 
-const IMAGE_PROMPT = `You are a nutrition expert. Identify the food item(s) in this image and provide detailed nutritional information.
+const IMAGE_PROMPT = `You are a nutrition expert specializing in Indian cuisine. Identify the food item(s) in this image.
 
-Return ONLY a valid JSON object with these exact fields:
-{
-  "name": "name of the food",
-  "description": "brief 1-2 sentence description",
-  "estimatedIngredients": ["ingredient1", "ingredient2"],
-  "estimatedNutrition": {
-    "calories": number (kcal per serving),
-    "protein": number (grams),
-    "carbs": number (grams),
-    "fat": number (grams),
-    "sugar": number (grams),
-    "sodium": number (grams, NOT mg — most foods 0.01-0.5g),
-    "fiber": number (grams)
-  },
-  "servingSize": "estimated serving size description",
-  "confidence": "high" or "medium" or "low",
-  "hygieneCategory": "fresh_produce" if raw fruit/vegetable/herb, otherwise "other",
-  "washInstructions": "specific washing instructions if fresh produce, otherwise null",
-  "storageAdvice": "storage advice if fresh produce, otherwise null"
-}
+IMPORTANT: This app is used in India. Look carefully for Indian dishes like:
+- Rice dishes: dal chawal, rajma chawal, kadhi chawal, curd rice, biryani, pulao, khichdi, lemon rice
+- Bread: roti, chapati, naan, paratha, puri, bhatura, dosa, uttapam, appam
+- Curries: dal (toor/moong/masoor/chana), rajma, chole, paneer butter masala, palak paneer, aloo gobi, bhindi, baingan
+- Snacks: samosa, pakora, vada pav, pav bhaji, chaat, bhel puri, dhokla, kachori, jalebi
+- Drinks: chai, lassi, buttermilk, nimbu pani
+- Thali: identify individual items on the plate separately
 
-Be accurate with nutrition estimates. Return ONLY valid JSON, no other text.`;
+If you see rice with a curry/dal on the side or mixed together, identify the SPECIFIC dish (e.g. "Dal Chawal" not just "rice with sauce").
+
+Return ONLY a valid JSON object:
+{"name":"specific food name","description":"brief description","estimatedIngredients":["ingredient1","ingredient2"],"estimatedNutrition":{"calories":0,"protein":0,"carbs":0,"fat":0,"sugar":0,"sodium":0.05,"fiber":0},"servingSize":"estimated serving size","confidence":"high","hygieneCategory":"other","washInstructions":null,"storageAdvice":null}
+
+Rules:
+- All nutrition values per serving, sodium in GRAMS (0.01-0.5g typical)
+- For plates with multiple items, name the combination (e.g. "Rajma Chawal with Salad")
+- hygieneCategory: "fresh_produce" ONLY for raw fruits/vegetables
+Return ONLY the JSON.`;
 
 const normalizeResult = (result) => ({
   name: result.name || 'Unknown Food',
@@ -94,7 +91,20 @@ exports.analyzeImage = async (req, res) => {
       }
     }
 
-    res.json({ source: `ai-vision-${source}`, data: normalizeResult(result) });
+    const normalized = normalizeResult(result);
+
+    // Cross-reference with Indian food database for accurate nutrition
+    const dbMatch = findMatch(normalized.name, normalized.description);
+    if (dbMatch) {
+      normalized.name = dbMatch.name;
+      normalized.description = dbMatch.description;
+      normalized.estimatedIngredients = dbMatch.ingredients;
+      normalized.estimatedNutrition = dbMatch.nutrition;
+      normalized.servingSize = dbMatch.serving;
+      normalized.confidence = 'high';
+    }
+
+    res.json({ source: `ai-vision-${source}`, data: normalized });
   } catch (error) {
     console.error('Image analysis failed:', error.message);
     res.status(500).json({ message: 'Failed to analyze image. Please try again.' });
