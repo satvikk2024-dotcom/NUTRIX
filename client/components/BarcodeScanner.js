@@ -89,7 +89,7 @@ const BarcodeScanner = ({ onResult, onClose }) => {
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/90 flex flex-col items-center justify-center p-4">
+    <div className="fixed inset-0 z-50 bg-ink/95 flex flex-col items-center justify-center p-4">
       {/* Header */}
       <div className="w-full max-w-md flex justify-between items-center mb-4 text-white">
         <h2 className="text-xl font-bold">Scan Barcode</h2>
@@ -97,13 +97,13 @@ const BarcodeScanner = ({ onResult, onClose }) => {
           {torch.isAvailable && (
             <button
               onClick={() => (torch.isOn ? torch.off() : torch.on())}
-              className="p-2 bg-gray-800 rounded-full hover:bg-gray-700"
+              className="p-2 bg-white/10 rounded-full hover:bg-white/20 transition"
               title={torch.isOn ? 'Turn off flashlight' : 'Turn on flashlight'}
             >
               {torch.isOn ? <ZapOff size={24} /> : <Zap size={24} />}
             </button>
           )}
-          <button onClick={onClose} className="p-2 bg-gray-800 rounded-full hover:bg-gray-700">
+          <button onClick={onClose} className="p-2 bg-white/10 rounded-full hover:bg-white/20 transition">
             <X size={24} />
           </button>
         </div>
@@ -112,24 +112,26 @@ const BarcodeScanner = ({ onResult, onClose }) => {
       {/* Camera Viewport */}
       <div
         onClick={handleTapToFocus}
-        className={`relative w-full max-w-md aspect-[3/4] bg-black rounded-2xl overflow-hidden border-2 shadow-2xl transition-colors cursor-pointer ${refocusing ? 'border-white' : 'border-gray-700'
+        className={`relative w-full max-w-md aspect-[3/4] bg-black rounded-2xl overflow-hidden border-2 shadow-2xl transition-colors cursor-pointer ${refocusing ? 'border-white' : 'border-white/15'
           }`}
       >
         <video ref={ref} className="w-full h-full object-cover" muted playsInline autoPlay />
 
-        {/* Scanning Line Animation */}
-        <div className="absolute inset-0 border-2 border-blue-500/50 m-8 rounded-lg pointer-events-none flex items-center justify-center">
-          <div className="w-full h-0.5 bg-blue-500 animate-pulse"></div>
+        {/* Centered scan window with green animated border pulse */}
+        <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+          <div className="w-3/4 aspect-[4/3] rounded-2xl border-2 border-accent animate-scan-pulse flex items-center justify-center">
+            <div className="w-4/5 h-0.5 bg-accent/80 rounded-full" />
+          </div>
         </div>
 
         {error && (
-          <div className="absolute inset-0 bg-black/80 flex items-center justify-center p-6">
-            <p className="text-red-400 text-center text-sm font-medium">{error}</p>
+          <div className="absolute inset-0 bg-ink/85 flex items-center justify-center p-6">
+            <p className="text-coral text-center text-sm font-medium">{error}</p>
           </div>
         )}
       </div>
 
-      <p className="mt-6 text-gray-400 text-center text-sm">
+      <p className="mt-6 text-white/60 text-center text-sm">
         Point your camera at a food barcode.<br />
         Hold ~10–15cm away. If it looks blurry, tap the frame to refocus.
       </p>
@@ -138,7 +140,7 @@ const BarcodeScanner = ({ onResult, onClose }) => {
       <div className="mt-4 w-full max-w-md">
         <button
           onClick={() => setShowManual((s) => !s)}
-          className="mx-auto flex items-center gap-1.5 text-sm font-medium text-gray-400 hover:text-white transition"
+          className="mx-auto flex items-center gap-1.5 text-sm font-medium text-white/60 hover:text-white transition"
         >
           <Keyboard size={16} /> Enter barcode manually
         </button>
@@ -151,12 +153,12 @@ const BarcodeScanner = ({ onResult, onClose }) => {
               value={manualCode}
               onChange={(e) => setManualCode(e.target.value)}
               placeholder="e.g. 7622300336738"
-              className="flex-1 h-12 px-4 rounded-xl bg-gray-800 border border-gray-700 text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="flex-1 h-12 px-4 rounded-xl bg-white/10 border border-white/15 text-white text-sm placeholder:text-white/40 focus:outline-none focus:ring-2 focus:ring-accent"
               autoFocus
             />
             <button
               type="submit"
-              className="px-5 h-12 rounded-xl bg-blue-600 text-white font-bold text-sm hover:bg-blue-700 transition"
+              className="px-5 h-12 rounded-xl bg-accent text-white font-bold text-sm hover:bg-accent-dark transition"
             >
               Go
             </button>

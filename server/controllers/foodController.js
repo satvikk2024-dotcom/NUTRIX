@@ -1,6 +1,7 @@
 const axios = require('axios');
 const { calculateHealthScore } = require('../utils/healthScore');
 const { checkDietSuitability } = require('../utils/dietChecker');
+const { generateHomemade } = require('../utils/homemadeRecipes');
 
 // OpenFoodFacts blocks/rate-limits requests that send axios's default
 // User-Agent (returns HTML "temporarily unavailable" pages or 503s instead
@@ -55,6 +56,31 @@ const pickBestMatch = (hits, query) => {
   return bestOverlap > 0 ? best : hits[0];
 };
 
+// Extract the per-100g nutrients we care about from a raw OFF product record.
+const nutrientsFromRaw = (rawData) => ({
+  calories: round1(rawData.nutriments?.['energy-kcal_100g']),
+  protein: round1(rawData.nutriments?.proteins_100g),
+  carbs: round1(rawData.nutriments?.carbohydrates_100g),
+  sugar: round1(rawData.nutriments?.sugars_100g),
+  fat: round1(rawData.nutriments?.fat_100g),
+  sodium: round1(rawData.nutriments?.sodium_100g),
+});
+
+// Fallback used by the homemade endpoint when the caller doesn't pass the
+// already-fetched nutrients: look the product up by name (same search-a-licious
+// + full-product flow as searchFood) and return its per-100g nutrients.
+const fetchNutrientsByName = async (name) => {
+  const searchUrl = `https://search.openfoodfacts.org/search?q=${encodeURIComponent(name)}&page_size=24`;
+  const searchRes = await offGet(searchUrl);
+  const hit = pickBestMatch(searchRes.data.hits, name);
+  if (!hit?.code) return null;
+
+  const productUrl = `https://world.openfoodfacts.org/api/v0/product/${encodeURIComponent(hit.code)}.json`;
+  const productRes = await offGet(productUrl);
+  if (productRes.data.status === 0 || !productRes.data.product) return null;
+  return nutrientsFromRaw(productRes.data.product);
+};
+
 exports.searchFood = async (req, res) => {
   const { query, type, forbidden } = req.query;
 
@@ -101,14 +127,7 @@ exports.searchFood = async (req, res) => {
       allergens: rawData.allergens_tags || [],
       additives: rawData.additives_tags?.map((t) => t.replace('en:', '').toUpperCase()) || [],
       nutrientLevels: rawData.nutrient_levels || {},
-      nutrients: {
-        calories: round1(rawData.nutriments?.['energy-kcal_100g']),
-        protein: round1(rawData.nutriments?.proteins_100g),
-        carbs: round1(rawData.nutriments?.carbohydrates_100g),
-        sugar: round1(rawData.nutriments?.sugars_100g),
-        fat: round1(rawData.nutriments?.fat_100g),
-        sodium: round1(rawData.nutriments?.sodium_100g),
-      },
+      nutrients: nutrientsFromRaw(rawData),
     };
 
     // 3. CHECK SUITABILITY + SCORE
@@ -183,6 +202,39 @@ exports.searchFood = async (req, res) => {
       suitability,
       alternative,
     });
+  } catch (error) {
+    console.error(error.message);
+    res.status(500).json({ message: 'Server Error' });
+  }
+};
+
+// GET /api/v1/food/homemade?name=<foodName>&calories=&protein=&carbs=&fat=&sugar=&sodium=
+// Generates a homemade-recipe alternative for a low-scoring product. The
+// frontend passes the per-100g nutrients it already fetched (so we don't hit
+// OFF again); if they're absent we look the product up by name as a fallback.
+exports.getHomemade = async (req, res) => {
+  const { name, calories, protein, carbs, fat, sugar, sodium } = req.query;
+
+  if (!name) return res.status(400).json({ message: 'name is required' });
+
+  try {
+    const num = (v) => (v === undefined || v === '' ? undefined : Number(v));
+    const passed = {
+      calories: num(calories),
+      protein: num(protein),
+      carbs: num(carbs),
+      fat: num(fat),
+      sugar: num(sugar),
+      sodium: num(sodium),
+    };
+
+    let nutrients = passed;
+    const anyPassed = Object.values(passed).some((v) => v !== undefined && !Number.isNaN(v));
+    if (!anyPassed) {
+      nutrients = (await fetchNutrientsByName(name)) || {};
+    }
+
+    res.json(generateHomemade(name, nutrients));
   } catch (error) {
     console.error(error.message);
     res.status(500).json({ message: 'Server Error' });

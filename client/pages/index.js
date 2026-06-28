@@ -1,34 +1,112 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import Head from 'next/head';
 import axios from 'axios';
 import {
-  Search, Scan, Leaf, AlertCircle, Settings, Moon, Sun, ChevronRight, X, Info,
-  Sparkles, Home as HomeIcon, Flame, Wheat, Beef, Candy
+  Search, Scan, Leaf, AlertCircle, Info, Sparkles, ChevronRight, ChevronDown,
+  User, History as HistoryIcon, Trash2
 } from 'lucide-react';
 import BarcodeScanner from '../components/BarcodeScanner';
 
+const DEFAULT_PROFILE = { name: '', age: '', gender: '', allergies: '' };
+const PROFILE_KEY = 'nutrix_profile';
+const HISTORY_KEY = 'nutrix_history';
+const HISTORY_LIMIT = 50;
+
+// Map the 0–100 health score to an A–E grade for the score ring.
+const scoreToGrade = (score) => {
+  if (score >= 80) return 'A';
+  if (score >= 65) return 'B';
+  if (score >= 50) return 'C';
+  if (score >= 35) return 'D';
+  return 'E';
+};
+const GRADE_COLOR = { A: '#4CAF78', B: '#4CAF78', C: '#F59E0B', D: '#E8734A', E: '#E8734A' };
+
+const formatDate = (ts) => {
+  try {
+    return new Date(ts).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  } catch (e) {
+    return '';
+  }
+};
+
 export default function Home() {
   // --- STATE ---
+  const [tab, setTab] = useState('search'); // 'search' | 'history' | 'profile'
   const [query, setQuery] = useState('');
   const [foodData, setFoodData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
   const [error, setError] = useState('');
 
-  // Custom Diet State
-  const [forbiddenText, setForbiddenText] = useState('');
-  const [showSettings, setShowSettings] = useState(false);
+  // Persistent profile (name, age, gender, allergies). Allergies feed the diet
+  // check on every search automatically.
+  const [profile, setProfile] = useState(DEFAULT_PROFILE);
 
-  // Dark Mode State
-  const [darkMode, setDarkMode] = useState(false);
+  // Persistent search history.
+  const [history, setHistory] = useState([]);
+
+  // Homemade alternative (shown when the product scores C or below, <= 59).
+  const [homemade, setHomemade] = useState(null);
+  const [homemadeLoading, setHomemadeLoading] = useState(false);
+  const [showHomemade, setShowHomemade] = useState(false);
 
   const searchInputRef = useRef(null);
 
-  // --- HANDLERS ---
-  const toggleTheme = () => {
-    setDarkMode(!darkMode);
+  // Load saved profile + history once on mount (localStorage is client-only).
+  useEffect(() => {
+    try {
+      const savedProfile = localStorage.getItem(PROFILE_KEY);
+      if (savedProfile) setProfile({ ...DEFAULT_PROFILE, ...JSON.parse(savedProfile) });
+      const savedHistory = localStorage.getItem(HISTORY_KEY);
+      if (savedHistory) setHistory(JSON.parse(savedHistory));
+    } catch (e) { /* ignore corrupt/unavailable storage */ }
+  }, []);
+
+  // Persist the profile whenever it changes.
+  useEffect(() => {
+    try {
+      localStorage.setItem(PROFILE_KEY, JSON.stringify(profile));
+    } catch (e) { /* ignore unavailable storage */ }
+  }, [profile]);
+
+  // Persist history whenever it changes.
+  useEffect(() => {
+    try {
+      localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
+    } catch (e) { /* ignore unavailable storage */ }
+  }, [history]);
+
+  const updateProfile = (key, value) => setProfile((p) => ({ ...p, [key]: value }));
+
+  const saveToHistory = (d) => {
+    if (!d || !d.data) return;
+    const entry = {
+      timestamp: Date.now(),
+      productName: d.data.name,
+      brand: d.data.brand,
+      image: d.data.image || null,
+      customScore: d.customScore,
+      nutriScore: d.data.nutriScore,
+      macros: {
+        calories: d.data.nutrients.calories,
+        protein: d.data.nutrients.protein,
+        carbs: d.data.nutrients.carbs,
+        fat: d.data.nutrients.fat,
+      },
+      isSuitable: d.suitability ? d.suitability.isSuitable : true,
+      barcode: d.data.barcode,
+    };
+    // Drop any earlier entry for the same product, then prepend the fresh one.
+    setHistory((prev) => {
+      const deduped = prev.filter((h) => !(entry.barcode && entry.barcode !== 'N/A' && h.barcode === entry.barcode));
+      return [entry, ...deduped].slice(0, HISTORY_LIMIT);
+    });
   };
 
+  const clearHistory = () => setHistory([]);
+
+  // --- HANDLERS ---
   const searchFood = async (searchTerm) => {
     const term = searchTerm || query;
     if (!term) return;
@@ -36,6 +114,8 @@ export default function Home() {
     setLoading(true);
     setError('');
     setFoodData(null);
+    setHomemade(null);
+    setShowHomemade(false);
 
     try {
       const type = /^\d+$/.test(term) ? 'barcode' : 'name';
@@ -43,15 +123,44 @@ export default function Home() {
         params: {
           query: term,
           type,
-          forbidden: forbiddenText
+          forbidden: profile.allergies
         }
       });
       setFoodData(res.data);
+      saveToHistory(res.data);
+      fetchHomemade(res.data);
     } catch (err) {
       console.error(err);
       setError('Food not found. Please try another name or barcode.');
     } finally {
       setLoading(false);
+    }
+  };
+
+  // For products scoring C or below (<= 59), fetch a homemade recipe + a
+  // side-by-side macro/cost comparison. Reuses the nutrients we already have.
+  const fetchHomemade = async (data) => {
+    if (!data || data.customScore > 59) return;
+
+    setHomemadeLoading(true);
+    try {
+      const n = data.data.nutrients;
+      const res = await axios.get(`http://localhost:5055/api/v1/food/homemade`, {
+        params: {
+          name: data.data.name,
+          calories: n.calories,
+          protein: n.protein,
+          carbs: n.carbs,
+          fat: n.fat,
+          sugar: n.sugar,
+          sodium: n.sodium
+        }
+      });
+      setHomemade(res.data);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setHomemadeLoading(false);
     }
   };
 
@@ -61,368 +170,543 @@ export default function Home() {
     searchFood(barcode);
   };
 
-  // Helper for Score Badge Color
-  const getScoreColor = (score) => {
-    if (score >= 80) return 'bg-green-500';
-    if (score >= 50) return 'bg-amber-500';
-    return 'bg-red-500';
+  // Re-display a past result in the Search tab (re-fetches for the full view).
+  const openFromHistory = (item) => {
+    const term = item.barcode && item.barcode !== 'N/A' ? item.barcode : item.productName;
+    setTab('search');
+    setQuery(term);
+    searchFood(term);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   };
+
+  const suitable = foodData?.suitability ? foodData.suitability.isSuitable : true;
 
   // --- RENDER ---
   return (
-    <div className={darkMode ? "dark" : ""}>
+    <div className="min-h-screen bg-base font-sans text-ink">
       <Head>
         <title>NUTRIX | Nutrition Tracker</title>
       </Head>
-      <div className="min-h-screen transition-colors duration-300 bg-slate-100 dark:bg-slate-950 font-sans text-slate-800 dark:text-slate-100">
 
-        {/* --- TOP APP BAR --- */}
-        <header className="sticky top-0 z-30 bg-white/90 dark:bg-slate-900/90 backdrop-blur border-b border-slate-200 dark:border-slate-800">
-          <div className="max-w-2xl mx-auto px-4 h-16 flex items-center justify-between">
-            <div className="flex items-center gap-2.5">
-              <div className="w-9 h-9 rounded-xl bg-blue-600 flex items-center justify-center text-white font-extrabold shadow-sm shadow-blue-600/30">
-                N
-              </div>
-              <div className="leading-tight">
-                <p className="font-extrabold text-slate-800 dark:text-white tracking-tight">NUTRIX</p>
-                <p className="text-[10px] font-bold text-blue-500 tracking-widest uppercase">Nutrition Tracker</p>
-              </div>
-            </div>
-            <button
-              onClick={toggleTheme}
-              className="w-10 h-10 flex items-center justify-center rounded-full bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-300 hover:bg-blue-50 dark:hover:bg-slate-700 hover:text-blue-600 transition"
-            >
-              {darkMode ? <Sun size={18} /> : <Moon size={18} />}
-            </button>
-          </div>
-        </header>
+      {/* --- HEADER --- */}
+      <header className="sticky top-0 z-30 bg-surface shadow-soft">
+        <div className="max-w-2xl mx-auto px-4 h-16 flex items-center justify-between">
+          <span className="text-2xl font-extrabold tracking-tight text-accent">NUTRIX</span>
+          <button
+            onClick={() => setTab('profile')}
+            title="My Profile"
+            className="w-10 h-10 rounded-full bg-accent-light text-accent-dark flex items-center justify-center font-extrabold hover:shadow-soft transition"
+          >
+            {profile.name ? profile.name.trim().charAt(0).toUpperCase() : <User size={18} />}
+          </button>
+        </div>
+      </header>
 
-        <main className="max-w-2xl mx-auto px-4 pt-5 pb-28 space-y-4">
+      <main className="max-w-2xl mx-auto px-4 pt-6 pb-28">
 
-          {/* --- SEARCH CARD --- */}
-          <section className="bg-white dark:bg-slate-800 rounded-2xl shadow-sm p-4">
-            <h2 className="text-sm font-bold text-slate-700 dark:text-slate-200 mb-3 flex items-center gap-1.5">
-              <Search size={15} className="text-blue-500" /> Search a food or scan a barcode
-            </h2>
-            <div className="relative">
+        {/* ====================== SEARCH TAB ====================== */}
+        {tab === 'search' && (
+          <div className="space-y-5">
+            {/* Search bar */}
+            <div className="relative rounded-full bg-surface shadow-soft focus-within:shadow-focus transition-shadow">
               <input
                 ref={searchInputRef}
                 type="text"
-                placeholder="e.g. Oreo, Greek Yogurt, 7622300336738..."
-                className="w-full h-14 pl-4 pr-24 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-800 dark:text-white text-[15px] focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition placeholder:text-slate-400"
+                placeholder="Search a food or scan a barcode…"
+                className="w-full h-14 rounded-full bg-transparent pl-6 pr-28 text-[15px] text-ink placeholder:text-subtle focus:outline-none"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && searchFood()}
               />
-
-              <div className="absolute right-1.5 top-1.5 bottom-1.5 flex gap-1.5">
+              <div className="absolute right-2 top-2 bottom-2 flex items-center gap-1.5">
                 <button
                   onClick={() => setIsScanning(true)}
-                  className="aspect-square h-full flex items-center justify-center rounded-lg text-slate-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-slate-700 transition"
-                  title="Scan Barcode"
+                  className="w-10 h-10 flex items-center justify-center rounded-full text-subtle hover:text-accent-dark hover:bg-accent-light transition"
+                  title="Scan barcode"
                 >
                   <Scan size={20} />
                 </button>
                 <button
                   onClick={() => searchFood()}
-                  className="aspect-square h-full flex items-center justify-center rounded-lg bg-blue-600 text-white hover:bg-blue-700 shadow-sm shadow-blue-600/30 transition-all active:scale-95"
+                  className="w-10 h-10 flex items-center justify-center rounded-full bg-accent text-white hover:bg-accent-dark transition active:scale-95"
                 >
-                  {loading ? <div className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin" /> : <Search size={20} />}
+                  {loading
+                    ? <div className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+                    : <Search size={20} />}
                 </button>
               </div>
             </div>
-          </section>
 
-          {/* --- DIET PREFERENCES TOGGLE --- */}
-          <section>
-            <button
-              onClick={() => setShowSettings(!showSettings)}
-              className="w-full flex items-center justify-between bg-white dark:bg-slate-800 rounded-2xl shadow-sm p-4 text-sm font-bold text-slate-700 dark:text-slate-200"
-            >
-              <span className="flex items-center gap-2">
-                <Settings size={16} className={showSettings ? 'text-blue-500' : 'text-slate-400'} />
-                Diet Preferences
-              </span>
-              <ChevronRight size={18} className={`text-slate-400 transition-transform ${showSettings ? 'rotate-90' : ''}`} />
-            </button>
-
-            {showSettings && (
-              <div className="mt-2 bg-white dark:bg-slate-800 rounded-2xl shadow-sm p-4 border border-blue-100 dark:border-slate-700 animate-fade-in-down">
-                <div className="flex justify-between items-start mb-2">
-                  <p className="text-xs text-slate-400">We'll flag foods that contain these ingredients.</p>
-                  <button onClick={() => setShowSettings(false)} className="text-slate-300 hover:text-red-500 -mt-1"><X size={16} /></button>
-                </div>
-                <textarea
-                  className="w-full p-3 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-blue-500 focus:outline-none transition text-sm dark:text-white"
-                  placeholder="e.g. peanuts, milk, sugar, palm oil..."
-                  rows="2"
-                  value={forbiddenText}
-                  onChange={(e) => setForbiddenText(e.target.value)}
-                />
+            {/* Error */}
+            {error && (
+              <div className="p-4 bg-coral-light border border-coral/20 rounded-2xl flex items-center gap-3 text-coral">
+                <AlertCircle size={18} />
+                <span className="text-sm font-semibold">{error}</span>
               </div>
             )}
-          </section>
 
-          {/* --- ERROR --- */}
-          {error && (
-            <div className="p-4 bg-red-50 dark:bg-red-900/20 border border-red-100 dark:border-red-800 rounded-2xl flex items-center gap-3 text-red-600 dark:text-red-400">
-              <AlertCircle size={18} />
-              <span className="text-sm font-medium">{error}</span>
-            </div>
-          )}
+            {/* Results */}
+            {foodData && (
+              <div className="space-y-5 animate-fade-in-up">
 
-          {/* --- RESULTS --- */}
-          {foodData && (
-            <div className="space-y-4 animate-fade-in-up">
-
-              {/* 1. PRODUCT HEADER CARD */}
-              <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-sm p-5">
-                <div className="flex gap-4 items-center">
-                  <div className="w-20 h-20 sm:w-24 sm:h-24 shrink-0 bg-slate-50 rounded-xl p-2 flex items-center justify-center">
-                    <img
-                      src={foodData.data.image || 'https://placehold.co/200?text=No+Image'}
-                      alt={foodData.data.name}
-                      className="w-full h-full object-contain mix-blend-multiply"
-                    />
+                {/* 1. RESULT CARD */}
+                <div className="bg-surface rounded-2xl shadow-card p-6 overflow-hidden">
+                  {/* Suitability banner */}
+                  <div
+                    className={`-mx-6 -mt-6 mb-5 px-6 py-3 flex items-center gap-2 text-sm font-bold ${
+                      suitable ? 'bg-accent-light text-accent-dark' : 'bg-coral-light text-coral'
+                    }`}
+                  >
+                    {suitable
+                      ? <><Leaf size={16} /> Fits your diet</>
+                      : <><AlertCircle size={16} /> {foodData.suitability.reasons[0]}</>}
                   </div>
 
-                  <div className="flex-1 min-w-0">
-                    <h2 className="font-extrabold text-lg text-slate-800 dark:text-white leading-snug truncate">{foodData.data.name}</h2>
-                    <p className="text-sm text-slate-400 font-medium truncate">{foodData.data.brand}</p>
-
-                    <div className="mt-2">
-                      {foodData.suitability && !foodData.suitability.isSuitable ? (
-                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-red-50 dark:bg-red-900/30 text-red-600 dark:text-red-300 rounded-full text-xs font-bold">
-                          <AlertCircle size={13} /> {foodData.suitability.reasons[0]}
-                        </span>
-                      ) : (
-                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 rounded-full text-xs font-bold">
-                          <Leaf size={13} /> Fits your diet
-                        </span>
-                      )}
+                  {/* Product image (if available) */}
+                  {foodData.data.image && (
+                    <div className="flex justify-center mb-4">
+                      <div className="w-28 h-28 rounded-2xl bg-base p-3 flex items-center justify-center">
+                        <img
+                          src={foodData.data.image}
+                          alt={foodData.data.name}
+                          className="w-full h-full object-contain mix-blend-multiply"
+                        />
+                      </div>
                     </div>
+                  )}
+
+                  {/* Name / brand */}
+                  <div className="text-center">
+                    <h2 className="font-extrabold text-xl text-ink leading-snug">{foodData.data.name}</h2>
+                    <p className="text-sm text-subtle font-medium">{foodData.data.brand}</p>
                   </div>
 
-                  <div className="flex flex-col items-center justify-center shrink-0">
-                    <div className={`w-14 h-14 rounded-full flex items-center justify-center text-lg font-extrabold text-white shadow-md ${getScoreColor(foodData.customScore)}`}>
-                      {foodData.customScore}
+                  {/* Score ring + macro pills */}
+                  <div className="mt-5 flex items-center gap-5">
+                    <ScoreRing score={foodData.customScore} />
+                    <div className="flex flex-wrap gap-2 flex-1">
+                      <MacroPill label="Calories" value={foodData.data.nutrients.calories} unit="kcal" />
+                      <MacroPill label="Protein" value={foodData.data.nutrients.protein} unit="g" />
+                      <MacroPill label="Carbs" value={foodData.data.nutrients.carbs} unit="g" />
+                      <MacroPill label="Fat" value={foodData.data.nutrients.fat} unit="g" />
                     </div>
-                    <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mt-1.5">Score</span>
                   </div>
                 </div>
-              </div>
 
-              {/* 2. ALTERNATIVE SUGGESTION (Clickable) */}
-              {foodData.alternative && (
-                <div
-                  onClick={() => {
-                    setQuery(foodData.alternative.barcode);
-                    searchFood(foodData.alternative.barcode);
-                    window.scrollTo({ top: 0, behavior: 'smooth' });
-                  }}
-                  className="group cursor-pointer bg-blue-50 dark:bg-blue-900/20 border border-blue-100 dark:border-blue-800/40 rounded-2xl p-5 hover:bg-blue-100 dark:hover:bg-blue-900/30 transition-colors"
-                >
-                  <div className="flex items-start gap-3">
-                    <div className="p-2.5 bg-blue-600 rounded-full text-white shrink-0">
-                      <Sparkles size={18} />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <h4 className="font-bold text-blue-700 dark:text-blue-300 mb-2 flex items-center gap-2 text-sm">
-                        Better Choice Available
-                        <span className="text-[10px] font-semibold text-blue-400 opacity-0 group-hover:opacity-100 transition-opacity">
-                          Tap to view →
-                        </span>
-                      </h4>
+                {/* 2. ALTERNATIVE SUGGESTION (Clickable) */}
+                {foodData.alternative && (
+                  <div
+                    onClick={() => {
+                      setQuery(foodData.alternative.barcode);
+                      searchFood(foodData.alternative.barcode);
+                      window.scrollTo({ top: 0, behavior: 'smooth' });
+                    }}
+                    className="group cursor-pointer bg-surface rounded-2xl shadow-card p-5 hover:shadow-soft transition-shadow"
+                  >
+                    <div className="flex items-start gap-3">
+                      <div className="p-2.5 bg-accent rounded-full text-white shrink-0">
+                        <Sparkles size={18} />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <h4 className="font-bold text-accent-dark mb-2 flex items-center gap-2 text-sm">
+                          Better Choice Available
+                          <span className="text-[10px] font-semibold text-accent opacity-0 group-hover:opacity-100 transition-opacity">
+                            Tap to view →
+                          </span>
+                        </h4>
 
-                      <div className="flex items-center gap-3 bg-white dark:bg-slate-900 p-3 rounded-xl shadow-sm">
-                        <img src={foodData.alternative.image} alt="Alt" className="w-12 h-12 object-contain shrink-0" />
-                        <div className="min-w-0 flex-1">
-                          <p className="font-bold text-sm text-slate-800 dark:text-white truncate group-hover:text-blue-600 transition-colors">
-                            {foodData.alternative.name}
-                          </p>
-                          <p className="text-xs text-slate-400 truncate">{foodData.alternative.brand} • {foodData.alternative.calories} kcal</p>
+                        <div className="flex items-center gap-3 bg-base p-3 rounded-xl">
+                          <img src={foodData.alternative.image} alt="Alt" className="w-12 h-12 object-contain shrink-0" />
+                          <div className="min-w-0 flex-1">
+                            <p className="font-bold text-sm text-ink truncate group-hover:text-accent-dark transition-colors">
+                              {foodData.alternative.name}
+                            </p>
+                            <p className="text-xs text-subtle truncate">{foodData.alternative.brand} • {foodData.alternative.calories} kcal</p>
+                          </div>
+                          <span className="shrink-0 text-[10px] font-extrabold px-2 py-1 bg-accent-light text-accent-dark rounded-md uppercase">
+                            Nutri {foodData.alternative.nutriScore?.toUpperCase()}
+                          </span>
+                          <ChevronRight className="text-subtle group-hover:text-accent group-hover:translate-x-1 transition-all shrink-0" size={18} />
                         </div>
-                        <span className="shrink-0 text-[10px] font-extrabold px-2 py-1 bg-blue-100 dark:bg-blue-900/50 text-blue-700 dark:text-blue-300 rounded-md uppercase">
-                          Nutri {foodData.alternative.nutriScore?.toUpperCase()}
-                        </span>
-                        <ChevronRight className="text-slate-300 group-hover:text-blue-500 group-hover:translate-x-1 transition-all shrink-0" size={18} />
                       </div>
                     </div>
                   </div>
-                </div>
-              )}
+                )}
 
-              {/* 3. MACRO SUMMARY CARDS */}
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                <MacroCard icon={Flame} label="Calories" value={foodData.data.nutrients.calories} unit="kcal" color="slate" />
-                <MacroCard icon={Wheat} label="Carbs" value={foodData.data.nutrients.carbs} unit="g" color="blue" />
-                <MacroCard icon={Beef} label="Protein" value={foodData.data.nutrients.protein} unit="g" color="rose" />
-                <MacroCard
-                  icon={Candy}
-                  label="Sugar"
-                  value={foodData.data.nutrients.sugar}
-                  unit="g"
-                  color="amber"
-                  highlight={foodData.data.nutrients.sugar > 10}
-                />
-              </div>
-
-              {/* 4. NUTRITION FACTS LABEL */}
-              <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-sm p-5">
-                <div className="flex items-baseline justify-between">
-                  <h3 className="text-xl font-extrabold text-slate-800 dark:text-white tracking-tight">Nutrition Facts</h3>
-                  <span className="text-xs font-semibold text-slate-400">per 100g</span>
-                </div>
-                <div className="border-b-8 border-slate-800 dark:border-slate-100 my-2"></div>
-                <div className="flex items-center justify-between py-1">
-                  <span className="text-base font-extrabold text-slate-800 dark:text-white">Calories</span>
-                  <span className="text-3xl font-extrabold text-slate-800 dark:text-white">{foodData.data.nutrients.calories || 0}</span>
-                </div>
-                <div className="border-b-4 border-slate-800 dark:border-slate-100 mb-1"></div>
-
-                <NutritionRow label="Total Fat" value={foodData.data.nutrients.fat} unit="g" />
-                <NutritionRow label="Total Carbohydrate" value={foodData.data.nutrients.carbs} unit="g" />
-                <NutritionRow label="Sugars" value={foodData.data.nutrients.sugar} unit="g" indent highlight={foodData.data.nutrients.sugar > 10} />
-                <NutritionRow label="Protein" value={foodData.data.nutrients.protein} unit="g" />
-                <NutritionRow label="Sodium" value={Math.round((foodData.data.nutrients.sodium || 0) * 1000)} unit="mg" last />
-              </div>
-
-              {/* 5. NUTRIENT LEVELS */}
-              <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-sm p-5">
-                <h3 className="text-sm font-bold text-slate-400 uppercase tracking-wider mb-4">Nutrient Levels</h3>
-                <div className="space-y-3.5">
-                  <LevelBar label="Fat" level={foodData.data.nutrientLevels?.fat} />
-                  <LevelBar label="Saturated Fat" level={foodData.data.nutrientLevels?.['saturated-fat']} />
-                  <LevelBar label="Sugars" level={foodData.data.nutrientLevels?.sugars} />
-                  <LevelBar label="Salt" level={foodData.data.nutrientLevels?.salt} />
-                </div>
-              </div>
-
-              {/* 6. INGREDIENTS */}
-              <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-sm p-5">
-                <h3 className="text-sm font-bold text-slate-400 uppercase tracking-wider mb-3 flex items-center gap-2">
-                  <Info size={15} /> Ingredients
-                </h3>
-                <p className="text-sm leading-relaxed text-slate-600 dark:text-slate-300">
-                  {foodData.data.ingredientsText}
-                </p>
-
-                {foodData.data.additives.length > 0 && (
-                  <div className="mt-4 flex flex-wrap gap-1.5">
-                    {foodData.data.additives.map(tag => (
-                      <span key={tag} className="text-[11px] font-mono font-semibold bg-slate-100 dark:bg-slate-700 text-slate-500 dark:text-slate-300 px-2 py-1 rounded-md">
-                        {tag}
+                {/* 2b. HOMEMADE ALTERNATIVE (score C or below) */}
+                {foodData.customScore <= 59 && (homemadeLoading || homemade) && (
+                  <div className="bg-[#FFFBF5] rounded-2xl shadow-card overflow-hidden">
+                    <button
+                      onClick={() => setShowHomemade((s) => !s)}
+                      className="w-full flex items-center justify-between p-5 text-left"
+                    >
+                      <span className="flex items-center gap-2.5 min-w-0">
+                        <span className="text-xl" aria-hidden>🍳</span>
+                        <span className="min-w-0">
+                          <span className="block font-extrabold text-coral text-sm">Make it at home</span>
+                          <span className="block text-xs text-subtle truncate">A healthier, cheaper version you can cook yourself</span>
+                        </span>
                       </span>
-                    ))}
+                      {homemadeLoading
+                        ? <div className="w-4 h-4 border-2 border-coral/30 border-t-coral rounded-full animate-spin shrink-0" />
+                        : <ChevronDown size={18} className={`text-subtle shrink-0 transition-transform ${showHomemade ? 'rotate-180' : ''}`} />}
+                    </button>
+
+                    {showHomemade && homemade && (
+                      <div className="px-5 pb-5 space-y-5 animate-fade-in-down">
+                        {/* Recipe */}
+                        <div className="bg-surface rounded-xl p-4 shadow-soft">
+                          <h4 className="font-extrabold text-ink">{homemade.recipe.title}</h4>
+                          <p className="text-xs text-subtle mb-3">Serving: {homemade.recipe.servingDesc}</p>
+
+                          <p className="text-[11px] font-bold text-subtle uppercase tracking-wide mb-1.5">Ingredients</p>
+                          <ul className="list-disc list-inside space-y-0.5 text-sm text-ink/80 mb-3">
+                            {homemade.recipe.ingredients.map((ing, i) => <li key={i}>{ing}</li>)}
+                          </ul>
+
+                          <p className="text-[11px] font-bold text-subtle uppercase tracking-wide mb-2">Steps</p>
+                          <ol className="space-y-2">
+                            {homemade.recipe.steps.map((step, i) => (
+                              <li key={i} className="flex gap-3 text-sm text-ink/80">
+                                <span className="shrink-0 w-6 h-6 rounded-full bg-coral-light text-coral font-bold text-xs flex items-center justify-center">{i + 1}</span>
+                                <span className="pt-0.5">{step}</span>
+                              </li>
+                            ))}
+                          </ol>
+                        </div>
+
+                        {/* Comparison table */}
+                        <div className="bg-surface rounded-xl shadow-soft overflow-hidden">
+                          <div className="grid grid-cols-3 text-[11px] font-bold text-subtle uppercase tracking-wide px-4 py-2.5 border-b border-line">
+                            <span>Per serving</span>
+                            <span className="text-right">🍳 Homemade</span>
+                            <span className="text-right">Packaged</span>
+                          </div>
+                          {homemade.comparison.rows.map((row, i) => {
+                            const winner = betterSide(row.label, row.homemade, row.packaged);
+                            return (
+                              <div key={row.label} className={`grid grid-cols-3 items-center px-4 py-2.5 text-sm ${i % 2 === 1 ? 'bg-base/60' : ''}`}>
+                                <span className="font-medium text-ink/80">{row.label}</span>
+                                <span className={`text-right ${winner === 'homemade' ? 'font-extrabold text-accent-dark' : 'font-semibold text-ink/70'}`}>
+                                  {row.homemade}{row.unit}
+                                </span>
+                                <span className={`text-right ${winner === 'packaged' ? 'font-extrabold text-accent-dark' : 'font-semibold text-ink/70'}`}>
+                                  {row.packaged}{row.unit}
+                                </span>
+                              </div>
+                            );
+                          })}
+                          <div className="grid grid-cols-3 items-center px-4 py-3 border-t border-line">
+                            <span className="font-bold text-ink text-sm">Cost</span>
+                            {(() => {
+                              const cw = betterSide('Cost', homemade.comparison.cost.homemade, homemade.comparison.cost.packaged);
+                              return (
+                                <>
+                                  <span className={`text-right text-sm ${cw === 'homemade' ? 'font-extrabold text-accent-dark' : 'font-semibold text-ink/70'}`}>₹{homemade.comparison.cost.homemade}</span>
+                                  <span className={`text-right text-sm ${cw === 'packaged' ? 'font-extrabold text-accent-dark' : 'font-semibold text-ink/70'}`}>₹{homemade.comparison.cost.packaged}</span>
+                                </>
+                              );
+                            })()}
+                          </div>
+                        </div>
+                        <p className="text-[11px] text-subtle">{homemade.comparison.note}</p>
+                      </div>
+                    )}
                   </div>
                 )}
+
+                {/* 3. NUTRITION FACTS */}
+                <section className="bg-surface rounded-2xl shadow-card p-6">
+                  <div className="flex items-baseline justify-between">
+                    <h3 className="text-lg font-extrabold text-ink tracking-tight">Nutrition Facts</h3>
+                    <span className="text-xs font-semibold text-subtle">per 100g</span>
+                  </div>
+                  <div className="h-px bg-line my-3" />
+                  <div className="flex items-center justify-between py-1">
+                    <span className="text-base font-extrabold text-ink">Calories</span>
+                    <span className="text-3xl font-extrabold text-ink">{foodData.data.nutrients.calories || 0}</span>
+                  </div>
+                  <div className="h-0.5 bg-line my-1" />
+
+                  <NutritionRow label="Total Fat" value={foodData.data.nutrients.fat} unit="g" />
+                  <NutritionRow label="Total Carbohydrate" value={foodData.data.nutrients.carbs} unit="g" />
+                  <NutritionRow label="Sugars" value={foodData.data.nutrients.sugar} unit="g" indent highlight={foodData.data.nutrients.sugar > 10} />
+                  <NutritionRow label="Protein" value={foodData.data.nutrients.protein} unit="g" />
+                  <NutritionRow label="Sodium" value={Math.round((foodData.data.nutrients.sodium || 0) * 1000)} unit="mg" last />
+                </section>
+
+                {/* 4. NUTRIENT LEVELS */}
+                <section className="bg-surface rounded-2xl shadow-card p-6">
+                  <h3 className="text-sm font-bold text-subtle uppercase tracking-wider mb-4">Nutrient Levels</h3>
+                  <div className="space-y-3.5">
+                    <LevelBar label="Fat" level={foodData.data.nutrientLevels?.fat} />
+                    <LevelBar label="Saturated Fat" level={foodData.data.nutrientLevels?.['saturated-fat']} />
+                    <LevelBar label="Sugars" level={foodData.data.nutrientLevels?.sugars} />
+                    <LevelBar label="Salt" level={foodData.data.nutrientLevels?.salt} />
+                  </div>
+                </section>
+
+                {/* 5. INGREDIENTS */}
+                <section className="bg-surface rounded-2xl shadow-card p-6">
+                  <h3 className="text-sm font-bold text-subtle uppercase tracking-wider mb-3 flex items-center gap-2">
+                    <Info size={15} /> Ingredients
+                  </h3>
+                  <p className="text-sm leading-relaxed text-ink/80">
+                    {foodData.data.ingredientsText}
+                  </p>
+
+                  {foodData.data.additives.length > 0 && (
+                    <div className="mt-4 flex flex-wrap gap-1.5">
+                      {foodData.data.additives.map(tag => (
+                        <span key={tag} className="text-[11px] font-mono font-semibold bg-base text-subtle px-2 py-1 rounded-md">
+                          {tag}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </section>
+
               </div>
-
-            </div>
-          )}
-
-        </main>
-
-        {/* --- BOTTOM NAV --- */}
-        <nav className="fixed bottom-0 inset-x-0 z-30 bg-white/95 dark:bg-slate-900/95 backdrop-blur border-t border-slate-200 dark:border-slate-800">
-          <div className="max-w-2xl mx-auto grid grid-cols-4">
-            <BottomNavItem
-              icon={HomeIcon}
-              label="Home"
-              active={!showSettings}
-              onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
-            />
-            <BottomNavItem
-              icon={Search}
-              label="Search"
-              onClick={() => searchInputRef.current?.focus()}
-            />
-            <BottomNavItem
-              icon={Settings}
-              label="Goals"
-              active={showSettings}
-              onClick={() => setShowSettings(s => !s)}
-            />
-            <BottomNavItem
-              icon={darkMode ? Sun : Moon}
-              label="Theme"
-              onClick={toggleTheme}
-            />
+            )}
           </div>
-        </nav>
-
-        {/* --- SCANNER MODAL --- */}
-        {isScanning && (
-          <BarcodeScanner
-            onResult={handleScanResult}
-            onClose={() => setIsScanning(false)}
-          />
         )}
 
-      </div>
+        {/* ====================== HISTORY TAB ====================== */}
+        {tab === 'history' && (
+          <div className="space-y-4 animate-fade-in-up">
+            <div className="flex items-center justify-between">
+              <h2 className="text-lg font-extrabold text-ink">History</h2>
+              {history.length > 0 && (
+                <button
+                  onClick={clearHistory}
+                  className="flex items-center gap-1.5 text-sm font-semibold text-coral hover:text-coral/80 transition"
+                >
+                  <Trash2 size={15} /> Clear history
+                </button>
+              )}
+            </div>
+
+            {history.length === 0 ? (
+              <div className="bg-surface rounded-2xl shadow-card p-10 flex flex-col items-center text-center">
+                <div className="w-14 h-14 rounded-full bg-base flex items-center justify-center text-subtle mb-3">
+                  <HistoryIcon size={24} />
+                </div>
+                <p className="font-bold text-ink">No searches yet</p>
+                <p className="text-sm text-subtle mt-1">Foods you look up will appear here.</p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {history.map((item) => (
+                  <button
+                    key={item.timestamp}
+                    onClick={() => openFromHistory(item)}
+                    className="w-full text-left bg-surface rounded-2xl shadow-card p-3 flex items-center gap-3 hover:shadow-soft transition-shadow"
+                  >
+                    <div className="w-14 h-14 rounded-xl bg-base p-1.5 shrink-0 flex items-center justify-center">
+                      {item.image
+                        ? <img src={item.image} alt={item.productName} className="w-full h-full object-contain mix-blend-multiply" />
+                        : <span className="text-subtle"><Search size={18} /></span>}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="font-bold text-sm text-ink truncate">{item.productName}</p>
+                      {item.brand && <p className="text-xs text-subtle truncate">{item.brand}</p>}
+                      <p className="text-[11px] text-subtle mt-0.5">{formatDate(item.timestamp)}</p>
+                    </div>
+                    <ScoreRing score={item.customScore} size={46} showValue={false} />
+                    <ChevronRight size={18} className="text-subtle shrink-0" />
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ====================== PROFILE TAB ====================== */}
+        {tab === 'profile' && (
+          <div className="space-y-4 animate-fade-in-up">
+            <div className="flex items-center gap-3">
+              <div className="w-12 h-12 rounded-full bg-accent-light text-accent-dark flex items-center justify-center font-extrabold text-lg">
+                {profile.name ? profile.name.trim().charAt(0).toUpperCase() : <User size={20} />}
+              </div>
+              <div>
+                <h2 className="text-lg font-extrabold text-ink leading-tight">My Profile</h2>
+                <p className="text-xs text-subtle">Saved on this device</p>
+              </div>
+            </div>
+
+            <div className="bg-surface rounded-2xl shadow-card p-6 space-y-4">
+              <p className="text-xs text-subtle">We'll flag any food containing your allergens automatically.</p>
+
+              <div className="grid grid-cols-2 gap-3">
+                <FloatField label="Name" type="text" value={profile.name} onChange={(e) => updateProfile('name', e.target.value)} />
+                <FloatField label="Age" type="number" min="0" value={profile.age} onChange={(e) => updateProfile('age', e.target.value)} />
+              </div>
+
+              <div className="relative">
+                <select
+                  className="peer w-full rounded-xl border border-line bg-base/60 px-3 pt-5 pb-2 text-sm text-ink focus:border-accent focus:bg-surface focus:outline-none focus:ring-4 focus:ring-accent/15 transition appearance-none"
+                  value={profile.gender}
+                  onChange={(e) => updateProfile('gender', e.target.value)}
+                >
+                  <option value="">Prefer not to say</option>
+                  <option value="female">Female</option>
+                  <option value="male">Male</option>
+                  <option value="other">Other</option>
+                </select>
+                <label className="pointer-events-none absolute left-3 top-1.5 text-[11px] font-semibold text-subtle">Gender</label>
+                <ChevronDown size={16} className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-subtle" />
+              </div>
+
+              <FloatField
+                label="Allergies / ingredients to avoid"
+                textarea
+                rows={3}
+                value={profile.allergies}
+                onChange={(e) => updateProfile('allergies', e.target.value)}
+                hint="Separate each with a comma."
+              />
+            </div>
+          </div>
+        )}
+
+      </main>
+
+      {/* --- BOTTOM TAB BAR --- */}
+      <nav className="fixed bottom-0 inset-x-0 z-30 bg-surface shadow-[0_-2px_14px_rgba(26,26,46,0.06)]">
+        <div className="max-w-2xl mx-auto grid grid-cols-3">
+          <TabItem icon={Search} label="Search" active={tab === 'search'} onClick={() => setTab('search')} />
+          <TabItem icon={HistoryIcon} label="History" active={tab === 'history'} onClick={() => setTab('history')} />
+          <TabItem icon={User} label="Profile" active={tab === 'profile'} onClick={() => setTab('profile')} />
+        </div>
+      </nav>
+
+      {/* --- SCANNER MODAL --- */}
+      {isScanning && (
+        <BarcodeScanner
+          onResult={handleScanResult}
+          onClose={() => setIsScanning(false)}
+        />
+      )}
+
     </div>
   );
 }
 
 // --- Sub-components ---
 
-const MACRO_COLORS = {
-  slate: 'bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-300',
-  blue: 'bg-blue-100 text-blue-600 dark:bg-blue-900/40 dark:text-blue-400',
-  rose: 'bg-rose-100 text-rose-600 dark:bg-rose-900/40 dark:text-rose-400',
-  amber: 'bg-amber-100 text-amber-600 dark:bg-amber-900/40 dark:text-amber-400',
+// Lower-is-better for everything except protein; used to green-highlight the
+// winning value in each comparison row.
+const betterSide = (label, homemade, packaged) => {
+  if (homemade === packaged) return null;
+  const higherIsBetter = label === 'Protein';
+  const homemadeWins = higherIsBetter ? homemade > packaged : homemade < packaged;
+  return homemadeWins ? 'homemade' : 'packaged';
 };
 
-const MacroCard = ({ icon: Icon, label, value, unit, color, highlight }) => (
-  <div className={`bg-white dark:bg-slate-800 rounded-2xl shadow-sm p-4 flex flex-col items-center text-center gap-2 ${highlight ? 'ring-2 ring-red-400' : ''}`}>
-    <div className={`w-10 h-10 rounded-full flex items-center justify-center ${MACRO_COLORS[color]}`}>
-      <Icon size={18} />
+const ScoreRing = ({ score = 0, size = 100, showValue = true }) => {
+  const clamped = Math.max(0, Math.min(score, 100));
+  const grade = scoreToGrade(clamped);
+  const color = GRADE_COLOR[grade];
+  const big = size >= 80;
+  const stroke = big ? 9 : 5;
+  const r = (size - stroke) / 2;
+  const circ = 2 * Math.PI * r;
+  const offset = circ * (1 - clamped / 100);
+
+  return (
+    <div className="relative shrink-0" style={{ width: size, height: size }}>
+      <svg width={size} height={size} className="-rotate-90">
+        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="#EEEBE6" strokeWidth={stroke} />
+        <circle
+          cx={size / 2}
+          cy={size / 2}
+          r={r}
+          fill="none"
+          stroke={color}
+          strokeWidth={stroke}
+          strokeLinecap="round"
+          strokeDasharray={circ}
+          strokeDashoffset={offset}
+          style={{ transition: 'stroke-dashoffset 0.6s ease' }}
+        />
+      </svg>
+      <div className="absolute inset-0 flex flex-col items-center justify-center">
+        <span className="font-extrabold leading-none" style={{ color, fontSize: size * 0.36 }}>{grade}</span>
+        {showValue && big && <span className="text-[10px] font-bold text-subtle mt-1">{clamped}/100</span>}
+      </div>
     </div>
-    <p className="text-lg font-extrabold leading-none text-slate-800 dark:text-white">
-      {value || 0}<span className="text-xs font-medium text-slate-400 ml-0.5">{unit}</span>
-    </p>
-    <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wide">{label}</p>
-  </div>
+  );
+};
+
+const MacroPill = ({ label, value, unit }) => (
+  <span className="inline-flex items-baseline gap-1 rounded-full bg-mint px-3 py-1.5 text-xs font-semibold text-accent-dark">
+    {label}
+    <span className="font-extrabold">{value || 0}{unit}</span>
+  </span>
 );
 
 const NutritionRow = ({ label, value, unit, indent, last, highlight }) => (
-  <div className={`flex items-center justify-between py-2 ${!last ? 'border-b border-slate-100 dark:border-slate-700' : ''}`}>
-    <span className={`text-sm ${indent ? 'pl-4 text-slate-500 dark:text-slate-400' : 'font-bold text-slate-700 dark:text-slate-200'}`}>{label}</span>
-    <span className={`text-sm font-bold ${highlight ? 'text-red-500' : 'text-slate-700 dark:text-slate-200'}`}>{value || 0}{unit}</span>
+  <div className={`flex items-center justify-between py-2 ${!last ? 'border-b border-line' : ''}`}>
+    <span className={`text-sm ${indent ? 'pl-4 text-subtle' : 'font-bold text-ink'}`}>{label}</span>
+    <span className={`text-sm font-bold ${highlight ? 'text-coral' : 'text-ink'}`}>{value || 0}{unit}</span>
   </div>
 );
 
-// Traffic Light Levels
+// Traffic-light nutrient levels in brand colours.
 const LEVEL_CONFIG = {
-  low: { width: '33%', bar: 'bg-green-500', text: 'text-green-600 dark:text-green-400' },
-  moderate: { width: '66%', bar: 'bg-amber-500', text: 'text-amber-600 dark:text-amber-400' },
-  high: { width: '100%', bar: 'bg-red-500', text: 'text-red-600 dark:text-red-400' },
+  low: { width: '33%', bar: 'bg-accent', text: 'text-accent-dark' },
+  moderate: { width: '66%', bar: 'bg-warn', text: 'text-warn' },
+  high: { width: '100%', bar: 'bg-coral', text: 'text-coral' },
 };
 
 const LevelBar = ({ label, level }) => {
   if (!level) return null;
-  const config = LEVEL_CONFIG[level] || { width: '10%', bar: 'bg-slate-300', text: 'text-slate-400' };
+  const config = LEVEL_CONFIG[level] || { width: '10%', bar: 'bg-line', text: 'text-subtle' };
 
   return (
     <div>
       <div className="flex items-center justify-between mb-1.5">
-        <span className="text-sm font-medium text-slate-600 dark:text-slate-300">{label}</span>
+        <span className="text-sm font-medium text-ink/80">{label}</span>
         <span className={`text-xs font-bold uppercase ${config.text}`}>{level}</span>
       </div>
-      <div className="h-2 bg-slate-100 dark:bg-slate-700 rounded-full overflow-hidden">
+      <div className="h-2 bg-line rounded-full overflow-hidden">
         <div className={`h-full rounded-full transition-all ${config.bar}`} style={{ width: config.width }} />
       </div>
     </div>
   );
 };
 
-const BottomNavItem = ({ icon: Icon, label, active, onClick }) => (
+const TabItem = ({ icon: Icon, label, active, onClick }) => (
   <button
     onClick={onClick}
-    className={`flex flex-col items-center gap-1 py-2.5 text-[11px] font-bold transition-colors ${active ? 'text-blue-600' : 'text-slate-400 hover:text-slate-600 dark:hover:text-slate-300'
-      }`}
+    className="flex flex-col items-center gap-1 py-2.5 text-[11px] font-bold transition-colors"
+    style={{ color: active ? '#4CAF78' : '#6B7280' }}
   >
     <Icon size={20} strokeWidth={active ? 2.5 : 2} />
     {label}
   </button>
 );
+
+// Floating-label text / number / textarea field.
+const FloatField = ({ label, textarea, hint, rows, ...props }) => {
+  const shared =
+    'peer w-full rounded-xl border border-line bg-base/60 px-3 pt-5 pb-2 text-sm text-ink placeholder-transparent focus:border-accent focus:bg-surface focus:outline-none focus:ring-4 focus:ring-accent/15 transition';
+  const labelCls =
+    'pointer-events-none absolute left-3 top-2 text-[11px] font-semibold text-subtle transition-all ' +
+    'peer-placeholder-shown:top-3.5 peer-placeholder-shown:text-sm peer-placeholder-shown:font-normal ' +
+    'peer-focus:top-2 peer-focus:text-[11px] peer-focus:font-semibold peer-focus:text-accent-dark';
+
+  return (
+    <div>
+      <div className="relative">
+        {textarea ? (
+          <textarea {...props} rows={rows} placeholder=" " className={shared} />
+        ) : (
+          <input {...props} placeholder=" " className={shared} />
+        )}
+        <label className={labelCls}>{label}</label>
+      </div>
+      {hint && <p className="mt-1 text-[11px] text-subtle">{hint}</p>}
+    </div>
+  );
+};
