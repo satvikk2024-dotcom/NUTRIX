@@ -3,7 +3,7 @@ import Head from 'next/head';
 import axios from 'axios';
 import {
   Search, Scan, Leaf, AlertCircle, Info, Sparkles, ChevronRight, ChevronDown,
-  User, History as HistoryIcon, Trash2
+  User, History as HistoryIcon, Trash2, Home as HomeIcon
 } from 'lucide-react';
 import BarcodeScanner from '../components/BarcodeScanner';
 
@@ -32,7 +32,7 @@ const formatDate = (ts) => {
 
 export default function Home() {
   // --- STATE ---
-  const [tab, setTab] = useState('search'); // 'search' | 'history' | 'profile'
+  const [tab, setTab] = useState('dashboard'); // 'dashboard' | 'search' | 'history' | 'profile'
   const [query, setQuery] = useState('');
   const [foodData, setFoodData] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -203,6 +203,16 @@ export default function Home() {
       </header>
 
       <main className="max-w-2xl mx-auto px-4 pt-6 pb-28">
+
+        {/* ====================== DASHBOARD TAB ====================== */}
+        {tab === 'dashboard' && (
+          <Dashboard
+            profile={profile}
+            history={history}
+            onSeeAll={() => setTab('history')}
+            onOpenItem={openFromHistory}
+          />
+        )}
 
         {/* ====================== SEARCH TAB ====================== */}
         {tab === 'search' && (
@@ -573,7 +583,8 @@ export default function Home() {
 
       {/* --- BOTTOM TAB BAR --- */}
       <nav className="fixed bottom-0 inset-x-0 z-30 bg-surface shadow-[0_-2px_14px_rgba(26,26,46,0.06)]">
-        <div className="max-w-2xl mx-auto grid grid-cols-3">
+        <div className="max-w-2xl mx-auto grid grid-cols-4">
+          <TabItem icon={HomeIcon} label="Dashboard" active={tab === 'dashboard'} onClick={() => setTab('dashboard')} />
           <TabItem icon={Search} label="Search" active={tab === 'search'} onClick={() => setTab('search')} />
           <TabItem icon={HistoryIcon} label="History" active={tab === 'history'} onClick={() => setTab('history')} />
           <TabItem icon={User} label="Profile" active={tab === 'profile'} onClick={() => setTab('profile')} />
@@ -594,6 +605,40 @@ export default function Home() {
 
 // --- Sub-components ---
 
+// 30 rotating nutrition tips, indexed by day-of-year (see Dashboard).
+const DAILY_TIPS = [
+  'Read the ingredients list, not just the front of the pack. Ingredients are listed by weight, so the first few make up most of the product.',
+  '"Sugar-free" often just means artificial sweeteners were swapped in. Check whether that actually suits you before assuming it\'s healthier.',
+  'Sugar hides under many names — corn syrup, maltose, dextrose, fruit-juice concentrate. If several show up, the product is sugar-heavy.',
+  'Aim for protein at every meal. Spreading 20–30g across the day supports muscle better than one big serving at dinner.',
+  'The more ingredients you can\'t pronounce, the more processed a food usually is. Whole foods have short labels.',
+  'Drink a glass of water before meals. Thirst is often mistaken for hunger, and it helps with portion control.',
+  'Target around 25–30g of fibre a day. It keeps you full, steadies blood sugar, and feeds healthy gut bacteria.',
+  '"Low-fat" products often add sugar to replace lost flavour. Compare the sugar line against the regular version.',
+  'Check the serving size first. Nutrition numbers can look low simply because the listed serving is tiny.',
+  'Eat protein and fibre before the carbs in a meal to blunt the blood-sugar spike that follows.',
+  'Colour your plate. Different coloured fruits and vegetables deliver different vitamins and antioxidants.',
+  'Sodium adds up fast in packaged food. Aim to stay under 2,000mg a day, and rinse canned beans to cut salt.',
+  'Swap refined grains for whole grains — brown rice, oats and whole wheat keep you fuller and add fibre.',
+  'Front-of-pack claims like "natural" or "wholesome" aren\'t tightly regulated. Trust the nutrition panel instead.',
+  'A 30-minute walk after eating helps your body manage blood sugar far more than sitting still does.',
+  'Healthy fats matter — nuts, olive oil and avocado support your heart. It\'s the type of fat, not all fat, to watch.',
+  'If sugar is in the top three ingredients, treat the product as a dessert, however it\'s marketed.',
+  'Frozen fruit and veg are picked ripe and frozen fast — often as nutritious as fresh, and usually cheaper.',
+  'Eat slowly. It takes about 20 minutes for your brain to register fullness, which helps prevent overeating.',
+  '"Made with real fruit" can mean a tiny amount. Check how far down the ingredient list the fruit actually appears.',
+  'Plan and prep meals ahead. Having a healthy option ready makes you far less likely to reach for junk.',
+  'Liquid calories from juice and soda don\'t fill you up like solid food. Choose whole fruit over juice.',
+  'Greek yogurt has roughly twice the protein of regular yogurt — a great swap for a filling snack.',
+  'Watch portions on calorie-dense foods like nuts and cheese. A small handful, not a whole bowl.',
+  'Cook more at home. You control the salt, sugar and oil that restaurant and packaged meals hide.',
+  'Pair iron-rich plant foods (spinach, lentils) with vitamin C (citrus, peppers) to absorb more iron.',
+  '"Multigrain" isn\'t the same as "whole grain." Look for "100% whole grain" as the first ingredient.',
+  'Keep a water bottle in sight. Steady hydration through the day beats chugging it all at once.',
+  'Snack with intention: pair a carb with protein or fat (apple + peanut butter) to stay full longer.',
+  'Ultra-processed foods are engineered to be over-eaten. Notice when a snack vanishes before you\'ve tasted it.',
+];
+
 // Lower-is-better for everything except protein; used to green-highlight the
 // winning value in each comparison row.
 const betterSide = (label, homemade, packaged) => {
@@ -601,6 +646,131 @@ const betterSide = (label, homemade, packaged) => {
   const higherIsBetter = label === 'Protein';
   const homemadeWins = higherIsBetter ? homemade > packaged : homemade < packaged;
   return homemadeWins ? 'homemade' : 'packaged';
+};
+
+const mean = (arr) => arr.reduce((a, b) => a + b, 0) / arr.length;
+
+const Dashboard = ({ profile, history, onSeeAll, onOpenItem }) => {
+  const now = new Date();
+  const hour = now.getHours();
+  const greeting = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
+  const todayLabel = now.toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' });
+
+  // Tip of the day — rotate through 30 tips by day-of-year.
+  const startOfYear = new Date(now.getFullYear(), 0, 0);
+  const dayOfYear = Math.floor((now - startOfYear) / 86400000);
+  const tip = DAILY_TIPS[Math.floor(dayOfYear % 30)];
+
+  // Score average across all history entries (read from localStorage upstream).
+  const scores = history.map((h) => h.customScore).filter((s) => typeof s === 'number');
+  const average = scores.length ? Math.round(mean(scores)) : 0;
+  const grade = scoreToGrade(average);
+  const enoughForAvg = scores.length >= 2;
+
+  // This week vs last week.
+  const ts = now.getTime();
+  const WEEK = 7 * 86400000;
+  const thisWeek = history.filter((h) => ts - h.timestamp <= WEEK).map((h) => h.customScore);
+  const lastWeek = history.filter((h) => ts - h.timestamp > WEEK && ts - h.timestamp <= 2 * WEEK).map((h) => h.customScore);
+  const delta = thisWeek.length && lastWeek.length ? mean(thisWeek) - mean(lastWeek) : null;
+
+  const recent = history.slice(0, 3);
+  const empty = history.length === 0;
+
+  return (
+    <div className="space-y-5 animate-fade-in-up">
+      {/* Greeting */}
+      <div>
+        <h1 className="text-2xl font-extrabold text-ink leading-tight">
+          {greeting}{profile.name ? `, ${profile.name.trim()}` : ''}.
+        </h1>
+        <p className="text-sm text-subtle mt-0.5">{todayLabel}</p>
+      </div>
+
+      {empty ? (
+        /* Empty state replaces both the Score Average and Recent Scans. */
+        <div className="bg-surface rounded-2xl shadow-card p-8 flex flex-col items-center text-center">
+          <div className="w-14 h-14 rounded-full bg-accent-light text-accent-dark flex items-center justify-center mb-3">
+            <Sparkles size={24} />
+          </div>
+          <p className="font-bold text-ink">Start scanning to build your nutrition picture.</p>
+          <p className="text-sm text-subtle mt-1">Your scores and trends will show up here.</p>
+        </div>
+      ) : (
+        /* Health Score Average */
+        <div className="bg-surface rounded-2xl shadow-card p-6">
+          <h3 className="text-sm font-bold text-subtle uppercase tracking-wider mb-3">Health Score Average</h3>
+          {enoughForAvg ? (
+            <>
+              <div className="flex items-end gap-3">
+                <span className="text-5xl font-extrabold leading-none" style={{ color: GRADE_COLOR[grade] }}>{average}</span>
+                <span className="text-sm text-subtle font-semibold mb-1">/ 100</span>
+                <span
+                  className="ml-auto w-12 h-12 rounded-full flex items-center justify-center text-2xl font-extrabold text-white"
+                  style={{ background: GRADE_COLOR[grade] }}
+                >
+                  {grade}
+                </span>
+              </div>
+              {delta !== null && (
+                <p className="mt-3 text-sm font-semibold flex items-center gap-1.5">
+                  {delta > 0
+                    ? <span className="text-accent-dark">↑ +{delta.toFixed(1)}</span>
+                    : delta < 0
+                      ? <span className="text-coral">↓ {delta.toFixed(1)}</span>
+                      : <span className="text-subtle">→ 0.0</span>}
+                  <span className="text-subtle font-normal">vs last week</span>
+                </p>
+              )}
+            </>
+          ) : (
+            <p className="text-sm text-subtle">Scan some foods to see your average.</p>
+          )}
+        </div>
+      )}
+
+      {/* Tip of the Day */}
+      <div className="bg-surface rounded-2xl shadow-card p-6">
+        <h3 className="text-sm font-bold text-subtle uppercase tracking-wider mb-2">Tip of the Day 💡</h3>
+        <p className="text-[15px] leading-relaxed text-ink/90">{tip}</p>
+      </div>
+
+      {/* Recent Scans (hidden in the empty state) */}
+      {!empty && (
+        <div>
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-bold text-subtle uppercase tracking-wider">Recent Scans</h3>
+            <button onClick={onSeeAll} className="text-sm font-semibold text-accent-dark hover:text-accent transition">See all</button>
+          </div>
+          <div className="flex gap-3 overflow-x-auto pb-1 -mx-4 px-4">
+            {recent.map((item) => {
+              const g = scoreToGrade(item.customScore);
+              return (
+                <button
+                  key={item.timestamp}
+                  onClick={() => onOpenItem(item)}
+                  className="shrink-0 w-36 bg-surface rounded-2xl shadow-card p-3 text-left hover:shadow-soft transition-shadow"
+                >
+                  <div className="relative w-full h-20 rounded-xl bg-base p-2 flex items-center justify-center mb-2">
+                    {item.image
+                      ? <img src={item.image} alt={item.productName} className="w-full h-full object-contain mix-blend-multiply" />
+                      : <Search size={18} className="text-subtle" />}
+                    <span
+                      className="absolute top-1 right-1 w-6 h-6 rounded-full flex items-center justify-center text-[11px] font-extrabold text-white"
+                      style={{ background: GRADE_COLOR[g] }}
+                    >
+                      {g}
+                    </span>
+                  </div>
+                  <p className="text-sm font-bold text-ink truncate">{item.productName}</p>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
 };
 
 const ScoreRing = ({ score = 0, size = 100, showValue = true }) => {
